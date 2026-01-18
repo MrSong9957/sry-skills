@@ -1,5 +1,5 @@
 ---
-name: failure-analysis-taskforce
+name: analysis-pro
 description: ">一支由 AI IDE 架构师、系统调试专家、提示词工程师、工作流分析师和模型行为研究员组成的专业团队型技能。专门用于诊断 AI IDE 执行失败、无效果或结果不理想的原因，并基于 docs/ai-ide-lessons.md提供可执行的修复方案与提示词优化策略，从而提升后续执行成功率。"
 ---
 
@@ -36,7 +36,7 @@ inputs:
 
 # 3. 输出（Outputs）
 outputs:
-  failure_analysis_report:
+  analysis-pro_report:
     type: object
     description: >
       一份结构化的失败分析与修复方案报告，严格遵守指定输出格式，
