@@ -62,7 +62,8 @@
       "Bash(ping:*)",
       "Bash(cmd //c \"tasklist /FI \"\"PID eq 118676\"\"\")",
       "Bash(npx eslint:*)",
-      "Bash(./supabase.bat:*)"
+      "Bash(./supabase.bat:*)",
+      "Bash(git fetch:*)"
     ]
   }
 }
