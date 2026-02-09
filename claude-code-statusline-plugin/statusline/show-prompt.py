@@ -17,6 +17,15 @@ import re
 import urllib.request
 import urllib.error
 import hashlib
+import logging
+
+# ========== Windows 编码修复 ==========
+# 在 Windows 上设置正确的输出编码
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+# =================================
 
 # ========== 可配置参数 ==========
 # 中文显示字数限制
@@ -25,6 +34,10 @@ CHINESE_MAX_LENGTH = 15
 ENGLISH_MAX_WORDS = 10
 # 状态栏显示格式
 STATUS_FORMAT = "[最新指令:{summary}]"
+# API 超时时间（秒）
+API_TIMEOUT = 3
+# stdin 最大输入大小（字节）
+MAX_STDIN_SIZE = 1024 * 100  # 100KB
 # =================================
 
 # API 配置（使用 Claude Code 的代理）
@@ -36,10 +49,33 @@ CACHE_DIR = os.path.expanduser('~/.claude/cache')
 CACHE_FILE = os.path.join(CACHE_DIR, 'statusline-summary.txt')
 CACHE_KEY_FILE = os.path.join(CACHE_DIR, 'statusline-key.txt')
 
+# 配置日志
+logger = logging.getLogger(__name__)
+
+
+def validate_path(path):
+    """验证路径安全性，防止路径遍历攻击"""
+    if not path:
+        return False
+
+    # 规范化路径
+    try:
+        normalized = os.path.normpath(path)
+        # 检查是否包含路径遍历
+        if '..' in normalized:
+            logger.warning(f"检测到路径遍历尝试: {path}")
+            return False
+        # 检查是否为绝对路径（允许）
+        if os.path.isabs(normalized):
+            return True
+        return True
+    except Exception:
+        return False
+
 
 def get_cache_key(text):
-    """生成缓存键"""
-    return hashlib.md5(text.encode('utf-8')).hexdigest()
+    """生成缓存键（使用 SHA-256）"""
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
 def load_cached_summary():
@@ -83,9 +119,9 @@ def call_claude_api(prompt):
     if not BASE_URL:
         return None
 
-    # 使用最轻量的模型
+    # 使用最新的轻量级模型
     data = {
-        'model': 'claude-3-haiku-20240307',
+        'model': 'claude-3-5-haiku-20241022',
         'max_tokens': 50,
         'messages': [{'role': 'user', 'content': prompt}],
     }
@@ -104,8 +140,8 @@ def call_claude_api(prompt):
             method='POST'
         )
 
-        # 设置超时（状态栏需要快速响应）
-        with urllib.request.urlopen(req, timeout=2) as response:
+        # 使用配置的超时时间（状态栏需要快速响应）
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT) as response:
             result = json.loads(response.read().decode('utf-8'))
             summary = result.get('content', [{}])[0].get('text', '').strip()
 
@@ -119,7 +155,10 @@ def call_claude_api(prompt):
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
         # API 调用失败，回退到规则提取
         pass
-    except Exception:
+    except Exception as e:
+        # 记录异常但不中断状态栏显示
+        import logging
+        logging.getLogger(__name__).warning(f"API调用失败: {e}")
         pass
 
     return None
@@ -276,6 +315,11 @@ def extract_task_summary(text):
 def get_latest_user_instruction(transcript_path):
     """从会话记录中获取最新用户指令"""
     try:
+        # 验证路径安全性
+        if not validate_path(transcript_path):
+            logger.warning(f"无效的路径: {transcript_path}")
+            return ""
+
         if not os.path.exists(transcript_path):
             return ""
 
@@ -314,17 +358,26 @@ def get_latest_user_instruction(transcript_path):
                             return ' '.join(texts)
                     return str(content) if content else ""
 
-            except (json.JSONDecodeError, KeyError):
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.debug(f"跳过无效的会话记录行: {e}")
                 continue
 
         return ""
-    except Exception:
+    except (IOError, OSError) as e:
+        logger.error(f"读取会话文件失败: {e}")
+        return ""
+    except Exception as e:
+        logger.error(f"处理会话文件时发生意外错误: {e}")
         return ""
 
 
 def main():
     # 读取 stdin JSON（由 Claude Code 传入）
-    input_data = sys.stdin.read()
+    input_data = sys.stdin.read(MAX_STDIN_SIZE)
+
+    # 检查是否有更多数据（超过大小限制）
+    if sys.stdin.read(1):
+        logger.warning("stdin 输入超过大小限制，已截断")
 
     try:
         data = json.loads(input_data)
