@@ -12,6 +12,45 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
+# Dependency Check Function
+check_dependencies() {
+    local missing_deps=()
+
+    # Check for required commands
+    local deps=("docker" "docker-compose" "uname" "grep")
+
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" &> /dev/null; then
+            missing_deps+=("$dep")
+        fi
+    done
+
+    # Check for nc (optional on Windows)
+    if ! command -v nc &> /dev/null; then
+        if [ "$PLATFORM_ID" != "windows" ]; then
+            missing_deps+=("nc")
+        else
+            echo -e "${YELLOW}[Warning] 'nc' command not found on Windows, skipping connectivity test${NC}"
+        fi
+    fi
+
+    # Report missing dependencies
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        echo -e "${RED}[Error] Missing required dependencies:${NC}"
+        for dep in "${missing_deps[@]}"; do
+            echo -e "${RED}  - $dep${NC}"
+        done
+        echo -e "${YELLOW}Please install missing dependencies and try again.${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}✓ All dependencies are installed${NC}"
+}
+
+# Check dependencies before main logic
+check_dependencies
+echo ""
+
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}Docker Claude Code - Diagnostics${NC}"
 echo -e "${GREEN}========================================${NC}"
@@ -29,7 +68,7 @@ echo ""
 echo -e "${CYAN}Diagnostic Decision Tree:${NC}"
 echo "Container not working?"
 echo "├─→ API connection fails? → Check ANTHROPIC_BASE_URL"
-echo "├─→ Permission denied? → Switch to root user"
+echo "├─→ Permission denied? → Check sudo NOPASSWD:ALL setup"
 echo "├─→ Can't find host? → Verify platform-specific config"
 echo "└─→ Config not persisting? → Check volume mounts"
 echo ""
@@ -143,19 +182,24 @@ if [ "$RUNNING" = true ]; then
 
         echo -e "Testing connection to: ${CYAN}$PROXY_HOST:$PROXY_PORT${NC}"
 
-        # Test from within container
-        if docker-compose exec -T app sh -c "nc -z -w5 $PROXY_HOST $PROXY_PORT" 2>/dev/null; then
-            echo -e "${GREEN}[✓]${NC} API proxy is reachable from container"
+        # Test from within container (skip if nc not available)
+        if command -v nc &> /dev/null; then
+            if docker-compose exec -T app sh -c "nc -z -w5 $PROXY_HOST $PROXY_PORT" 2>/dev/null; then
+                echo -e "${GREEN}[✓]${NC} API proxy is reachable from container"
+            else
+                echo -e "${RED}[✗]${NC} API proxy is NOT reachable"
+                echo -e "${YELLOW}Possible causes:${NC}"
+                echo "1. CC Switch is not running on host"
+                echo "2. Wrong port configured (default: 15721)"
+                echo "3. Firewall blocking connection"
+                echo ""
+                echo -e "${YELLOW}Fix:${NC}"
+                echo "- Ensure CC Switch is running on host machine"
+                echo "- Verify port: $PROXY_PORT matches CC Switch configuration"
+            fi
         else
-            echo -e "${RED}[✗]${NC} API proxy is NOT reachable"
-            echo -e "${YELLOW}Possible causes:${NC}"
-            echo "1. CC Switch is not running on host"
-            echo "2. Wrong port configured (default: 15721)"
-            echo "3. Firewall blocking connection"
-            echo ""
-            echo -e "${YELLOW}Fix:${NC}"
-            echo "- Ensure CC Switch is running on host machine"
-            echo "- Verify port: $PROXY_PORT matches CC Switch configuration"
+            echo -e "${YELLOW}[!] nc command not available, skipping connectivity test${NC}"
+            echo -e "${YELLOW}Manual test:${NC} docker-compose exec app sh -c 'curl -v http://$PROXY_HOST:$PROXY_PORT'"
         fi
     fi
 
@@ -179,9 +223,35 @@ if [ "$RUNNING" = true ]; then
         echo -e "${GREEN}[✓]${NC} Write permissions are OK"
     else
         echo -e "${RED}[✗]${NC} Write permission DENIED"
-        echo -e "${YELLOW}Fix:${NC}"
-        echo "- Switch to root user: docker-compose exec -u root app bash"
-        echo "- Or fix permissions: docker-compose exec -u root app chown -R claude-user:claude-user /workspace"
+        echo -e "${YELLOW}Diagnosing sudo setup...${NC}"
+
+        # Test sudo access
+        if docker-compose exec -T app sh -c 'sudo whoami' >/dev/null 2>&1; then
+            echo -e "${GREEN}[✓]${NC} sudo is configured correctly"
+            echo -e "${YELLOW}Fix:${NC}"
+            echo "- Try using sudo for write operations"
+            echo "- Example: docker-compose exec app sh -c 'sudo touch /workspace/test'"
+        else
+            echo -e "${RED}[✗]${NC} sudo NOT configured or requires password"
+            echo -e "${YELLOW}Fix:${NC}"
+            echo "- Dockerfile is missing sudo NOPASSWD:ALL configuration"
+            echo "- Rebuild image with corrected Dockerfile:"
+            echo "  1. Add to Dockerfile: RUN apk add --no-cache sudo"
+            echo "  2. Add: echo 'claude ALL=(ALL:ALL) NOPASSWD:ALL' >> /etc/sudoers"
+            echo "  3. Run: docker-compose build && docker-compose up -d"
+        fi
+    fi
+
+    # Test sudo NOPASSWD configuration
+    echo ""
+    echo -e "${BLUE}Check 6.1: Sudo NOPASSWD Configuration${NC}"
+
+    if docker-compose exec -T app sh -c 'sudo -n whoami' >/dev/null 2>&1; then
+        echo -e "${GREEN}[✓]${NC} sudo NOPASSWD:ALL is configured correctly"
+    else
+        echo -e "${RED}[✗]${NC} sudo requires password or is not configured"
+        echo -e "${YELLOW}Impact:${NC} Non-root user cannot perform autonomous operations"
+        echo -e "${YELLOW}Fix:${NC} Update Dockerfile to include sudo NOPASSWD:ALL"
     fi
 
     # Check 7: Claude CLI installation
@@ -196,8 +266,175 @@ if [ "$RUNNING" = true ]; then
         echo -e "${RED}[✗]${NC} Claude CLI is NOT installed"
         echo -e "${YELLOW}Fix:${NC} Rebuild Docker image: docker-compose build"
     fi
+
+    # Check 7.1: Claude CLI Version Verification (using claude doctor)
+    echo ""
+    echo -e "${BLUE}Check 7.1: Claude CLI Version Verification${NC}"
+    echo -e "${CYAN}Running: claude doctor${NC}"
+
+    # 使用 claude doctor 验证版本和配置
+    DOCTOR_OUTPUT=$(docker-compose exec -T app sh -c 'claude doctor 2>&1' || echo "doctor failed")
+
+    if echo "$DOCTOR_OUTPUT" | grep -q "version"; then
+        # 提取版本信息
+        VERSION_INFO=$(echo "$DOCTOR_OUTPUT" | grep -i "version" | head -1)
+        echo -e "${GREEN}[✓]${NC} Claude Code 版本已验证:"
+        echo -e "  ${CYAN}$VERSION_INFO${NC}"
+
+        # 检查是否有更新可用提示
+        if echo "$DOCTOR_OUTPUT" | grep -qi "update available\|newer version\|outdated"; then
+            echo -e "${YELLOW}[!]${NC} 发现新版本的 Claude Code"
+            echo -e "${YELLOW}建议:${NC} 重新构建镜像: docker-compose up -d --build"
+        fi
+    else
+        echo -e "${YELLOW}[!]${NC} 无法验证版本信息"
+        echo -e "${YELLOW}注意:${NC} claude doctor 命令可能在此版本中不可用"
+        echo -e "${CYAN}当前安装的版本:${NC} $CLI_VERSION"
+    fi
+
+    echo ""
 else
     echo -e "${YELLOW}Skipping container checks - container is not running${NC}"
+fi
+
+# Check 8: Image build issues (even if container not running)
+echo ""
+echo -e "${BLUE}Check 8: Docker Image Build Status${NC}"
+
+if docker images | grep -q "docker-claude-code-app"; then
+    echo -e "${GREEN}[✓]${NC} Docker image exists"
+
+    # Check image size
+    IMAGE_SIZE=$(docker images docker-claude-code-app --format '{{.Size}}' 2>/dev/null)
+    if [ -n "$IMAGE_SIZE" ]; then
+        echo -e "${CYAN}Image size:${NC} $IMAGE_SIZE"
+    fi
+
+    # Check image creation time
+    IMAGE_AGE=$(docker images docker-claude-code-app --format '{{.CreatedSince}}' 2>/dev/null)
+    if [ -n "$IMAGE_AGE" ]; then
+        echo -e "${CYAN}Image age:${NC} $IMAGE_AGE"
+
+        # Warn if image is very old (> 30 days)
+        if echo "$IMAGE_AGE" | grep -q "[0-9]\+ days ago"; then
+            days=$(echo "$IMAGE_AGE" | grep -o "[0-9]\+ days ago" | grep -o "[0-9]\+")
+            if [ "$days" -gt 30 ]; then
+                echo -e "${YELLOW}[!] Image is $days days old, consider rebuilding${NC}"
+            fi
+        fi
+    fi
+else
+    echo -e "${RED}[✗]${NC} Docker image does NOT exist"
+    echo -e "${YELLOW}Fix:${NC} Build the image:"
+    echo "  cd $PROJECT_DIR"
+    echo "  docker-compose build"
+    echo ""
+    echo -e "${CYAN}Common build failures:${NC}"
+    echo "  - ${YELLOW}Network timeout:${NC} Cannot reach Docker Hub"
+    echo "    ${CYAN}Test:${NC} ping -c 2 hub.docker.com"
+    echo "    ${CYAN}Fix:${NC} Check internet connection or use mirror"
+    echo ""
+    echo "  ${YELLOW}Base image not found:${NC} node:20-slim unavailable"
+    echo "    ${CYAN}Test:${NC} docker pull node:20-slim"
+    echo "    ${CYAN}Fix:${NC} Pull base image first: docker pull node:20-slim"
+    echo ""
+    echo "  ${YELLOW}Build context errors:${NC} Missing files or wrong paths"
+    echo "    ${CYAN}Test:${NC} ls -la Dockerfile docker-compose.yml"
+    echo "    ${CYAN}Fix:${NC} Ensure all required files exist"
+fi
+
+# Check 9: Container startup issues
+echo ""
+echo -e "${BLUE}Check 9: Container Startup History${NC}"
+
+if [ "$RUNNING" = false ]; then
+    # Check recent container exits
+    EXITED_CONTAINER=$(docker ps -a --filter "name=docker-claude-code-app" --format "{{.Status}}" | head -1)
+
+    if [ -n "$EXITED_CONTAINER" ]; then
+        echo -e "${YELLOW}[!] Container exited with status:${NC} $EXITED_CONTAINER"
+        echo -e "${CYAN}Recent container logs (last 20 lines):${NC}"
+        docker logs docker-claude-code-app 2>&1 | tail -20
+
+        echo ""
+        echo -e "${CYAN}Common startup failures:${NC}"
+
+        # Check for specific error patterns in logs
+        FULL_LOGS=$(docker logs docker-claude-code-app 2>&1)
+
+        if echo "$FULL_LOGS" | grep -qi "permission denied"; then
+            echo -e "  ${YELLOW}Permission denied:${NC} Volume mount permissions issue"
+            echo "    ${CYAN}Fix:${NC} sudo chown -R $USER:$USER ./dev-home"
+        fi
+
+        if echo "$FULL_LOGS" | grep -qi "cannot connect"; then
+            echo -e "  ${YELLOW}Connection failed:${NC} API proxy or network issue"
+            echo "    ${CYAN}Fix:${NC} Check ANTHROPIC_BASE_URL and CC Switch"
+        fi
+
+        if echo "$FULL_LOGS" | grep -qi "cannot find.*claude"; then
+            echo -e "  ${YELLOW}Claude CLI not found:${NC} Image build incomplete"
+            echo "    ${CYAN}Fix:${NC} Rebuild image: docker-compose build --no-cache"
+        fi
+    else
+        echo -e "${YELLOW}[!] Container never created${NC}"
+        echo -e "${YELLOW}Fix:${NC} Run: docker-compose up -d"
+    fi
+elif [ -z "$RUNNING" ]; then
+    echo -e "${YELLOW}[!] Container does not exist${NC}"
+    echo -e "${YELLOW}Fix:${NC} Run: docker-compose up -d"
+fi
+
+# Check 10: System resource limits
+echo ""
+echo -e "${BLUE}Check 10: System Resources${NC}"
+
+# Check disk space
+DISK_AVAILABLE=$(df -BG . | tail -1 | awk '{print $4}' | sed 's/G//')
+if [ "$DISK_AVAILABLE" -lt 5 ]; then
+    echo -e "${RED}[✗]${NC} Low disk space: ${DISK_AVAILABLE}GB available"
+    echo -e "${YELLOW}Impact:${NC} May cause build failures or container crashes"
+    echo -e "${YELLOW}Fix:${NC} Clean up Docker resources:"
+    echo "  docker system prune -a"
+    echo "  docker volume prune"
+else
+    echo -e "${GREEN}[✓]${NC} Sufficient disk space: ${DISK_AVAILABLE}GB available"
+fi
+
+# Check Docker memory limits (if Docker Desktop is being used)
+if command -v docker &> /dev/null; then
+    # Check if Docker Desktop is running and get its memory limit
+    if docker info 2>/dev/null | grep -q " operating system"; then
+        echo -e "${CYAN}Docker Desktop detected${NC}"
+
+        # Try to get memory limit (may not work on all platforms)
+        if docker info 2>/dev/null | grep -q "Memory"; then
+            echo -e "${CYAN}Check Docker Desktop settings → Resources → Memory${NC}"
+        fi
+    fi
+fi
+
+# Check if container has resource limits
+if [ "$RUNNING" = true ]; then
+    # Check container memory limit
+    CONTAINER_MEMORY=$(docker inspect "$CONTAINER_NAME" --format '{{.HostConfig.Memory}}' 2>/dev/null || echo "0")
+
+    if [ "$CONTAINER_MEMORY" != "0" ] && [ -n "$CONTAINER_MEMORY" ]; then
+        MEMORY_MB=$((CONTAINER_MEMORY / 1024 / 1024))
+        echo -e "${CYAN}Container memory limit:${NC} ${MEMORY_MB}MB"
+
+        if [ "$MEMORY_MB" -lt 1024 ]; then
+            echo -e "${YELLOW}[!] Memory limit is low (< 1GB)${NC}"
+            echo -e "${YELLOW}Impact:${NC} May cause OOM errors during builds"
+            echo -e "${CYAN}Recommendation:${NC} Increase to at least 2GB in docker-compose.yml:"
+            echo "  deploy:"
+            echo "    resources:"
+            echo "      limits:"
+            echo "        memory: 2048M"
+        fi
+    else
+        echo -e "${GREEN}[✓]${NC} No memory limit set (uses host memory)"
+    fi
 fi
 
 echo ""
@@ -219,9 +456,13 @@ echo ""
 echo "3. ${YELLOW}View logs:${NC}"
 echo "   docker-compose logs -f"
 echo ""
-echo "4. ${YELLOW}Enter container as root:${NC}"
-echo "   docker-compose exec -u root app bash"
+echo "4. ${YELLOW}Test sudo configuration (non-root user):${NC}"
+echo "   docker-compose exec app sh -c 'sudo whoami'"
+echo "   # Should return 'root' without password prompt"
 echo ""
-echo "5. ${YELLOW}Enter container as non-root:${NC}"
+echo "5. ${YELLOW}Enter container as non-root (PRIMARY):${NC}"
 echo "   docker-compose exec app sh"
+echo ""
+echo "6. ${YELLOW}Enter container as root (EMERGENCY ONLY):${NC}"
+echo "   docker-compose exec -u root app sh"
 echo ""

@@ -16,6 +16,36 @@ ERRORS=0
 WARNINGS=0
 CHECKS=0
 
+# Dependency Check Function
+check_dependencies() {
+    local missing_deps=()
+
+    # Check for required commands
+    local deps=("uname" "grep")
+
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" &> /dev/null; then
+            missing_deps+=("$dep")
+        fi
+    done
+
+    # Report missing dependencies
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        echo -e "${RED}[Error] Missing required dependencies:${NC}"
+        for dep in "${missing_deps[@]}"; do
+            echo -e "${RED}  - $dep${NC}"
+        done
+        echo -e "${YELLOW}Please install missing dependencies and try again.${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}✓ All dependencies are installed${NC}"
+}
+
+# Check dependencies before main logic
+check_dependencies
+echo ""
+
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}Docker Claude Code - Config Validator${NC}"
 echo -e "${GREEN}========================================${NC}"
@@ -182,6 +212,20 @@ if [ -f "$PROJECT_DIR/Dockerfile" ]; then
         print_result "OK" "WORKDIR is set"
     else
         print_result "WARN" "No WORKDIR set"
+    fi
+
+    # Check for sudo installation
+    if grep -q "sudo" "$PROJECT_DIR/Dockerfile" 2>/dev/null; then
+        print_result "OK" "sudo package installation found"
+    else
+        print_result "ERROR" "sudo not installed - non-root user will lack autonomy"
+    fi
+
+    # Check for NOPASSWD:ALL configuration
+    if grep -q "NOPASSWD:ALL" "$PROJECT_DIR/Dockerfile" 2>/dev/null; then
+        print_result "OK" "sudo NOPASSWD:ALL configured (autonomous operations)"
+    else
+        print_result "ERROR" "NOPASSWD:ALL not configured - manual intervention will be required"
     fi
 fi
 
