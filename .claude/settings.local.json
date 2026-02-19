@@ -75,7 +75,12 @@
       "Bash(bash:*)",
       "Bash(chmod:*)",
       "Bash(python3:*)",
-      "Bash(git rm:*)"
+      "Bash(git rm:*)",
+      "Bash(git config:*)",
+      "Bash(git mv:*)",
+      "Bash(claude-code:*)",
+      "Bash(.venv/Scripts/pip.exe freeze:*)",
+      "Bash(lsof:*)"
     ]
   }
 }
